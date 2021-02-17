@@ -32,6 +32,7 @@ The driver class calculating force and related quantities.
 #include "utilities/error.cuh"
 #include "utilities/read_file.cuh"
 #include "vashishta.cuh"
+#include "at.cuh"
 #include <vector>
 
 #define BLOCK_SIZE 128
@@ -154,6 +155,8 @@ void Force::initialize_potential(
     potential[m].reset(new LJ(fid_potential, num_types));
   } else if (strcmp(potential_name, "ri") == 0) {
     potential[m].reset(new RI(fid_potential));
+  } else if (strcmp(potential_name, "at") == 0) {
+    potential[m].reset(new AT(fid_potential, num_types, neighbor));
   } else {
     PRINT_INPUT_ERROR("illegal potential model.\n");
   }
