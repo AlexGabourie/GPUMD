@@ -46,11 +46,12 @@ void AT::initialize_at_1(FILE* fid)
 {
   printf("Use single-element Axilrod-Teller potential.\n");
   int count;
-  double z, rc, rc3;
-  count = fscanf(fid, "%lf%lf%lf", &z, &rc, &rc3);
+  double z, rcglobal, rc3;
+  count = fscanf(fid, "%lf%lf%lf", &z, &rcglobal, &rc3);
   PRINT_SCANF_ERROR(count, 3, "Reading error for AT potential.");
 
   at_para.z[0] = z;
+  rc = rcglobal;
   at_para.rc2 = rc*rc;
   at_para.rc6 = rc3*rc3;
 }
@@ -59,14 +60,15 @@ void AT::initialize_at_2(FILE* fid)
 {
   printf("Use two-element Axilrod-Teller potential.\n");
   int count;
-  double z[4], rc, rc3;
-  count = fscanf(fid, "%lf%lf%lf%lf%lf%lf", &z[0], &z[1], &z[2], &z[3],&rc, &rc3);
+  double z[4], rcglobal, rc3;
+  count = fscanf(fid, "%lf%lf%lf%lf%lf%lf", &z[0], &z[1], &z[2], &z[3],&rcglobal, &rc3);
   PRINT_SCANF_ERROR(count, 6, "Reading error for AT potential.");
 
   at_para.z[0] = z[0];
   at_para.z[7] = z[1];
   at_para.z[1] = at_para.z[2] = at_para.z[4] = z[2];
   at_para.z[3] = at_para.z[5] = at_para.z[6] = z[3];
+  rc = rcglobal;
   at_para.rc2 = rc*rc;
   at_para.rc6 = rc3*rc3;
 }
@@ -96,6 +98,7 @@ static __global__ void gpu_set_f12_to_zero(
     }
   }
 }
+
 
 static __global__ void gpu_find_force_at_partial(
   const int number_of_atoms,
@@ -136,12 +139,14 @@ static __global__ void gpu_find_force_at_partial(
       double z12 = z2 - z1;
       apply_mic(box, x12, y12, z12);
       double d12d12 = x12*x12 + y12*y12 + z12*z12;
-      if (d12d12 >= at.rc2) {
+      if (d12d12 > at.rc2) {
         continue;
       }
       double d12d12inv = 1/d12d12;
       double f12x, f12y, f12z;
-      f12x = f12y = f12z = 0;
+      f12x = 0;
+      f12y = 0;
+      f12z = 0;
 
       for (int i2 = 0; i2 < neighbor_number; ++i2) {
         int n3 = g_neighbor_list[n1 + number_of_atoms * i2];
@@ -155,21 +160,22 @@ static __global__ void gpu_find_force_at_partial(
         double x13 = x3 - x1;
         double y13 = y3 - y1;
         double z13 = z3 - z1;
-        double x23 = x3 - x2;
-        double y23 = y3 - y2;
-        double z23 = z3 - z2;
         apply_mic(box, x13, y13, z13);
         double d13d13 = x13*x13 + y13*y13 + z13*z13;
         double d13d13inv = 1/d13d13;
-        if (d13d13 >= at.rc2) {
+        if (d13d13 > at.rc2) {
           continue;
         }
+        double x23 = x3 - x2;
+        double y23 = y3 - y2;
+        double z23 = z3 - z2;
+        apply_mic(box, x23, y23, z23);
         double d23d23 = x23*x23 + y23*y23 + z23*z23;
-        if (d13d13 >= at.rc2) {
+        if (d23d23 > at.rc2) {
           continue;
         }
         double dist2_prod = d12d12*d13d13*d23d23;
-        if (dist2_prod >= at.rc6){
+        if (dist2_prod > at.rc6){
           continue;
         }
         double z = at.z[(type1<<2)+(type2<<1)+type3];
@@ -185,17 +191,17 @@ static __global__ void gpu_find_force_at_partial(
         double tmp2 = 5*ddd*d13d13inv - d12d23*d13d23 - d12d12*d23d23;
         double tmp3 = -1*(d12d13*d13d23 + d12d13*d12d23);
 
-        f12x += 3*scale*(tmp1*x12 + tmp2*x13 + tmp3*x23);
-        f12y += 3*scale*(tmp1*y12 + tmp2*y13 + tmp3*y23);
-        f12z += 3*scale*(tmp1*z12 + tmp2*z13 + tmp3*z23);
-
+        f12x += scale*(tmp1*x12 + tmp2*x13 + tmp3*x23);
+        f12y += scale*(tmp1*y12 + tmp2*y13 + tmp3*y23);
+        f12z += scale*(tmp1*z12 + tmp2*z13 + tmp3*z23);
       }
       g_f12x[index] = f12x;
       g_f12y[index] = f12y;
       g_f12z[index] = f12z;
+
     }
     // save potential
-    g_potential[n1] = potential_energy;
+    g_potential[n1] = potential_energy/6.0;
 
   }
 }
