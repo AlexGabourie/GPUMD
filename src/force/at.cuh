@@ -21,6 +21,7 @@
 struct AT_Para {
   double z[8];
   double rc2, rc6;
+  int rcnum;
 };
 
 struct AT_Data {

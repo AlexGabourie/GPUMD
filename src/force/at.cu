@@ -45,32 +45,46 @@ AT::AT(FILE* fid, int num_of_types, const Neighbor& neighbor)
 void AT::initialize_at_1(FILE* fid)
 {
   printf("Use single-element Axilrod-Teller potential.\n");
-  int count;
+  int count, rcnum;
   double z, rcglobal, rc3;
-  count = fscanf(fid, "%lf%lf%lf", &z, &rcglobal, &rc3);
-  PRINT_SCANF_ERROR(count, 3, "Reading error for AT potential.");
+  count = fscanf(fid, "%lf%lf%lf%d", &z, &rcglobal, &rc3, &rcnum);
+  PRINT_SCANF_ERROR(count, 4, "Reading error for AT potential.");
 
   at_para.z[0] = z;
-  rc = rcglobal;
+  if (rcglobal <= 0.0 || rc3 <= 0.0){
+    PRINT_INPUT_ERROR("AT potential error: Cutoffs must be positive.\n");
+  }
+    rc = rcglobal;
   at_para.rc2 = rc*rc;
   at_para.rc6 = rc3*rc3;
+  if (rcnum != 2 && rcnum != 3){
+    PRINT_INPUT_ERROR("AT potential error: Number of enforcable cutoffs should be 2 or 3.\n");
+  }
+  at_para.rcnum = rcnum;
 }
 
 void AT::initialize_at_2(FILE* fid)
 {
   printf("Use two-element Axilrod-Teller potential.\n");
-  int count;
+  int count, rcnum;
   double z[4], rcglobal, rc3;
-  count = fscanf(fid, "%lf%lf%lf%lf%lf%lf", &z[0], &z[1], &z[2], &z[3],&rcglobal, &rc3);
-  PRINT_SCANF_ERROR(count, 6, "Reading error for AT potential.");
+  count = fscanf(fid, "%lf%lf%lf%lf%lf%lf%d", &z[0], &z[1], &z[2], &z[3],&rcglobal, &rc3, &rcnum);
+  PRINT_SCANF_ERROR(count, 7, "Reading error for AT potential.");
 
   at_para.z[0] = z[0];
   at_para.z[7] = z[1];
   at_para.z[1] = at_para.z[2] = at_para.z[4] = z[2];
   at_para.z[3] = at_para.z[5] = at_para.z[6] = z[3];
+  if (rcglobal <= 0.0 || rc3 <= 0.0){
+      PRINT_INPUT_ERROR("AT potential error: Cutoffs must be positive.\n");
+    }
   rc = rcglobal;
   at_para.rc2 = rc*rc;
   at_para.rc6 = rc3*rc3;
+  if (rcnum != 2 && rcnum != 3){
+      PRINT_INPUT_ERROR("AT potential error: Number of enforcable cutoffs should be 2 or 3.\n");
+    }
+  at_para.rcnum = rcnum;
 }
 
 AT::~AT(void)
@@ -131,6 +145,7 @@ static __global__ void gpu_find_force_at_partial(
       int index = i1 * number_of_atoms + n1;
       int n2 = g_neighbor_list[index];
       int type2 = g_type[n2] - shift;
+      int tally_12 = 1; // denotes valid pair
       double x2 = g_x[n2];
       double y2 = g_y[n2];
       double z2 = g_z[n2];
@@ -140,13 +155,11 @@ static __global__ void gpu_find_force_at_partial(
       apply_mic(box, x12, y12, z12);
       double d12d12 = x12*x12 + y12*y12 + z12*z12;
       if (d12d12 > at.rc2) {
-        continue;
+        tally_12 = 0;
       }
       double d12d12inv = 1/d12d12;
       double f12x, f12y, f12z;
-      f12x = 0;
-      f12y = 0;
-      f12z = 0;
+      f12x = f12y = f12z = 0;
 
       for (int i2 = 0; i2 < neighbor_number; ++i2) {
         int n3 = g_neighbor_list[n1 + number_of_atoms * i2];
@@ -154,6 +167,8 @@ static __global__ void gpu_find_force_at_partial(
           continue;
         }
         int type3 = g_type[n3] - shift;
+        int tally_13 = 1;
+        int tally_23 = 1;
         double x3 = g_x[n3];
         double y3 = g_y[n3];
         double z3 = g_z[n3];
@@ -162,22 +177,28 @@ static __global__ void gpu_find_force_at_partial(
         double z13 = z3 - z1;
         apply_mic(box, x13, y13, z13);
         double d13d13 = x13*x13 + y13*y13 + z13*z13;
-        double d13d13inv = 1/d13d13;
         if (d13d13 > at.rc2) {
-          continue;
+          tally_13 = 0;
         }
+        double d13d13inv = 1/d13d13;
+
         double x23 = x3 - x2;
         double y23 = y3 - y2;
         double z23 = z3 - z2;
         apply_mic(box, x23, y23, z23);
         double d23d23 = x23*x23 + y23*y23 + z23*z23;
         if (d23d23 > at.rc2) {
-          continue;
+          tally_23 = 0;
         }
         double dist2_prod = d12d12*d13d13*d23d23;
         if (dist2_prod > at.rc6){
           continue;
         }
+
+        if (tally_12 + tally_13 + tally_23 < at.rcnum){
+          continue;
+        }
+
         double z = at.z[(type1<<2)+(type2<<1)+type3];
         double scale = z/(dist2_prod*dist2_prod*sqrt(dist2_prod));
         double d12d13 = x12*x13 + y12*y13 + z12*z13;
@@ -219,7 +240,6 @@ void AT::compute(
   const int number_of_atoms = type.size();
   const int grid_size = (N2 - N1 - 1) / BLOCK_SIZE_AT + 1;
 
-  // TODO check speed comparison to "resize" function.
   gpu_set_f12_to_zero<<<grid_size, BLOCK_SIZE_AT>>>(
     number_of_atoms, N1, N2, neighbor.NN_local.data(), at_data.f12x.data(), at_data.f12y.data(),
     at_data.f12z.data());
